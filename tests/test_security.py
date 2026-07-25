@@ -484,6 +484,102 @@ class ConfigFilePermissions(unittest.TestCase):
         self.assertEqual(seen, [0o600])
 
 
+@unittest.skipIf(os.name == "nt", "POSIX permission bits only")
+class ConversationFilePermissions(unittest.TestCase):
+    """The memory, chapter and log files hold actual conversations — for
+    this app's users usually more private than the API keys."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self._saved = {k: getattr(ab, k) for k in
+                       ("APP_DIR", "CONFIG_PATH", "MEMORY_PATH", "LOG_DIR",
+                        "DEBUG_PATH", "STORY_PATH", "GUESTS_MEMORY_PATH")}
+        d = self._tmp.name
+        ab.APP_DIR = d
+        ab.CONFIG_PATH = os.path.join(d, "config.json")
+        ab.MEMORY_PATH = os.path.join(d, "ani_memory.md")
+        ab.LOG_DIR = os.path.join(d, "session_logs")
+        ab.DEBUG_PATH = os.path.join(d, "api_debug.log")
+        ab.STORY_PATH = os.path.join(d, "ani_story_state.md")
+        ab.GUESTS_MEMORY_PATH = os.path.join(d, "guest_memory.md")
+
+    def tearDown(self):
+        for k, v in self._saved.items():
+            setattr(ab, k, v)
+        self._tmp.cleanup()
+
+    def _mode(self, path):
+        return os.stat(path).st_mode & 0o777
+
+    def test_memory_file_is_owner_only(self):
+        ab.append_memory("a private thing Ani chose to remember")
+        self.assertEqual(self._mode(ab.MEMORY_PATH), 0o600)
+
+    def test_debug_log_is_owner_only(self):
+        ab._debug("GET /whatever 200")
+        self.assertEqual(self._mode(ab.DEBUG_PATH), 0o600)
+
+    def test_story_file_and_chapter_dir_are_private(self):
+        ab.save_story("the story so far")
+        p = ab._chapter_path("story")
+        self.assertEqual(self._mode(p), 0o600)
+        self.assertEqual(self._mode(os.path.dirname(p)), 0o700)
+
+    def test_guest_memory_is_owner_only(self):
+        ab.save_guest_memory("notes from a guest visit")
+        self.assertEqual(self._mode(ab._chapter_path("guests")), 0o600)
+        ab.append_guest_memory("more notes")
+        self.assertEqual(self._mode(ab._chapter_path("guests")), 0o600)
+
+    def test_existing_loose_conversation_file_is_tightened(self):
+        ab.append_memory("first")
+        os.chmod(ab.MEMORY_PATH, 0o644)      # as an older version left it
+        ab.append_memory("second")
+        self.assertEqual(self._mode(ab.MEMORY_PATH), 0o600)
+
+    def test_append_mode_does_not_truncate(self):
+        """_open_private must map "a" to O_APPEND, not O_TRUNC."""
+        ab.append_memory("first entry")
+        ab.append_memory("second entry")
+        with open(ab.MEMORY_PATH, encoding="utf-8") as f:
+            body = f.read()
+        self.assertIn("first entry", body)
+        self.assertIn("second entry", body)
+
+    def test_migrated_legacy_file_is_tightened(self):
+        with open(ab.STORY_PATH, "w", encoding="utf-8") as f:
+            f.write("pre-chapters story")
+        os.chmod(ab.STORY_PATH, 0o644)
+        self.assertEqual(ab.load_story().strip(), "pre-chapters story")
+        self.assertEqual(self._mode(ab._chapter_path("story")), 0o600)
+
+    def test_open_private_rejects_nothing_it_is_given(self):
+        w = os.path.join(self._tmp.name, "w.txt")
+        with ab._open_private(w, "w") as f:
+            f.write("one")
+        with ab._open_private(w, "w") as f:
+            f.write("two")
+        with open(w, encoding="utf-8") as f:
+            self.assertEqual(f.read(), "two")   # "w" truncates
+        self.assertEqual(self._mode(w), 0o600)
+
+
+class VersionIsSingleSourced(unittest.TestCase):
+    """Bumping APP_VERSION alone used to leave PAGEV stale, which pins a
+    permanent 'reload this page' banner on every dashboard."""
+
+    def test_page_carries_app_version(self):
+        self.assertIn("const PAGEV='%s';" % ab.APP_VERSION, ab.PAGE)
+        self.assertIn(">v%s<" % ab.APP_VERSION, ab.PAGE)
+
+    def test_no_placeholder_survives_into_the_page(self):
+        self.assertNotIn("__APPVER__", ab.PAGE)
+
+    def test_state_version_matches_the_page(self):
+        self.assertIn("const PAGEV='%s';" % ab.BRIDGE.snapshot()["version"],
+                      ab.PAGE)
+
+
 class EnvSecretOverride(unittest.TestCase):
     """Secrets may come from the environment instead of config.json."""
 

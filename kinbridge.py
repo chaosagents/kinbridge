@@ -105,6 +105,41 @@ DEFAULT_CONFIG = {
 _cfg_lock = threading.Lock()
 
 
+# Everything this app writes beside itself is private. config.json holds
+# five API keys and the access PIN; the memory, chapter, session-log and
+# debug files hold your actual conversations — for most people the more
+# sensitive of the two. All of it is created 0600 (files) or 0700
+# (directories) so other users on a shared machine can't read it.
+#
+# The mode is set at creation rather than chmod-ed afterwards, so there
+# is never a window where the contents sit in a world-readable file.
+# None of this is encryption: anything running as your user can still
+# read these. See SECURITY.md.
+def _open_private(path, mode="w"):
+    """open(path, mode) for files only you should be able to read.
+    Supports the "w" and "a" modes this app uses."""
+    flags = os.O_WRONLY | os.O_CREAT
+    flags |= os.O_APPEND if mode == "a" else os.O_TRUNC
+    fd = os.open(path, flags, 0o600)
+    try:
+        # O_CREAT's mode applies only when the file is created, so tighten
+        # one an older version left readable. Via the fd rather than the
+        # path so it can't land on a file swapped in underneath us.
+        os.fchmod(fd, 0o600)
+    except (AttributeError, OSError):
+        pass  # no fchmod on Windows; the O_CREAT mode still applied
+    return os.fdopen(fd, mode, encoding="utf-8")
+
+
+def _makedirs_private(path):
+    """makedirs(exist_ok=True) for directories holding conversation data."""
+    os.makedirs(path, mode=0o700, exist_ok=True)
+    try:
+        os.chmod(path, 0o700)  # tighten one an older version created
+    except OSError:
+        pass
+
+
 # Credentials never leave this machine in the clear. A remote client (LAN
 # or Tailscale) that reads /api/config gets SECRET_MASK in place of each
 # configured secret, so a stolen PIN buys control of the bridge but not
@@ -195,15 +230,8 @@ def save_config(new_values):
     with _cfg_lock:
         # 0600 from the moment it exists — creating it world-readable and
         # chmod-ing afterwards leaves a window where the keys are exposed
-        fd = os.open(CONFIG_PATH, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
+        with _open_private(CONFIG_PATH, "w") as f:
             json.dump(cfg, f, indent=2, ensure_ascii=False)
-        try:
-            # O_CREAT's mode is ignored for a file that already exists, so
-            # tighten one written by an older version too. No-op on Windows.
-            os.chmod(CONFIG_PATH, 0o600)
-        except OSError:
-            pass
     cfg.update(env)  # callers get the effective config, not the stored one
     return cfg
 
@@ -234,8 +262,10 @@ def _migrate_legacy(old, new):
     """One-time move of a pre-chapters file into the current chapter's slot."""
     if os.path.exists(old) and not os.path.exists(new):
         try:
-            os.makedirs(os.path.dirname(new), exist_ok=True)
+            _makedirs_private(os.path.dirname(new))
             os.replace(old, new)
+            # the moved file keeps whatever mode the old version gave it
+            os.chmod(new, 0o600)
         except OSError:
             pass
 
@@ -254,8 +284,8 @@ def load_story():
 
 def save_story(text):
     p = _chapter_path("story")
-    os.makedirs(os.path.dirname(p), exist_ok=True)
-    with open(p, "w", encoding="utf-8") as f:
+    _makedirs_private(os.path.dirname(p))
+    with _open_private(p, "w") as f:
         f.write(text.strip() + "\n")
 
 
@@ -277,24 +307,24 @@ def load_guest_memory():
 def append_guest_memory(text):
     p = _chapter_path("guests")
     _migrate_legacy(GUESTS_MEMORY_PATH, p)
-    os.makedirs(os.path.dirname(p), exist_ok=True)
+    _makedirs_private(os.path.dirname(p))
     stamp = datetime.now().strftime("%Y-%m-%d %H:%M")
     block = "\n\n## Notes added " + stamp + "\n" + text.strip() + "\n"
-    with open(p, "a", encoding="utf-8") as f:
+    with _open_private(p, "a") as f:
         f.write(block)
 
 
 def save_guest_memory(text):
     p = _chapter_path("guests")
-    os.makedirs(os.path.dirname(p), exist_ok=True)
-    with open(p, "w", encoding="utf-8") as f:
+    _makedirs_private(os.path.dirname(p))
+    with _open_private(p, "w") as f:
         f.write(text)
 
 
 def append_memory(text):
     stamp = datetime.now().strftime("%Y-%m-%d %H:%M")
     block = "\n\n## Memories saved " + stamp + "\n" + text.strip() + "\n"
-    with open(MEMORY_PATH, "a", encoding="utf-8") as f:
+    with _open_private(MEMORY_PATH, "a") as f:
         f.write(block)
 
 
@@ -306,7 +336,7 @@ DEBUG_PATH = os.path.join(APP_DIR, "api_debug.log")
 def _debug(line):
     """Append one line to api_debug.log (never logs API keys)."""
     try:
-        with open(DEBUG_PATH, "a", encoding="utf-8") as f:
+        with _open_private(DEBUG_PATH, "a") as f:
             f.write("[%s] %s\n" % (datetime.now().strftime("%H:%M:%S"), line))
     except Exception:
         pass
@@ -748,11 +778,11 @@ class Bridge:
 
     def _log(self, name, text):
         try:
-            os.makedirs(LOG_DIR, exist_ok=True)
+            _makedirs_private(LOG_DIR)
             if not self._log_path:
                 stamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
                 self._log_path = os.path.join(LOG_DIR, "session_" + stamp + ".txt")
-            with open(self._log_path, "a", encoding="utf-8") as f:
+            with _open_private(self._log_path, "a") as f:
                 f.write("[%s] %s: %s\n\n" % (datetime.now().strftime("%H:%M:%S"), name, text))
         except Exception:
             pass
@@ -2052,8 +2082,8 @@ dialog::backdrop{background:rgba(8,5,14,.7)}
 <body>
 <div class="wrap">
   <header>
-    <h1>Ani <span class="x">&harr;</span> Kindroid</h1>
-    <span class="pill" id="verchip">v28</span>
+    <h1>Kinbridge</h1>
+    <span class="pill" id="verchip">v__APPVER__</span>
     <span id="onair" class="pill"><span class="dot"></span><span id="onairText">Offline</span></span>
     <span class="spacer"></span>
     <span id="costchip" class="pill" title="Estimated xAI spend this session">≈$0.000</span>
@@ -2283,7 +2313,7 @@ dialog::backdrop{background:rgba(8,5,14,.7)}
 
 <script>
 const $=id=>document.getElementById(id);
-const PAGEV='28';
+const PAGEV='__APPVER__';
 const dlg=$('dlg'), memdlg=$('memdlg'), syncdlg=$('syncdlg');
 
 async function buildSync(){
@@ -2561,6 +2591,14 @@ tick();
 </html>
 """
 
+# APP_VERSION is the single source of truth for the version. The page
+# shows it in the header pill and keeps a copy in PAGEV, which the
+# dashboard compares against the server's reported version to notice it
+# is running stale HTML. Those two used to be hand-synced literals: bump
+# one without the other and every user sees a permanent "a newer version
+# is running, reload this page" banner.
+PAGE = PAGE.replace("__APPVER__", APP_VERSION)
+
 
 # ---------------------------------------------------------------- web server
 
@@ -2834,7 +2872,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         elif path == "/api/memory-file":
             if "text" in body:
-                with open(MEMORY_PATH, "w", encoding="utf-8") as f:
+                with _open_private(MEMORY_PATH, "w") as f:
                     f.write(body.get("text", ""))
             if "story" in body:
                 save_story(body.get("story", ""))
@@ -2983,7 +3021,7 @@ if __name__ == "__main__":
         import traceback
         err = traceback.format_exc()
         try:
-            with open(os.path.join(APP_DIR, "crash.log"), "w", encoding="utf-8") as f:
+            with _open_private(os.path.join(APP_DIR, "crash.log"), "w") as f:
                 f.write(err)
         except Exception:
             pass
