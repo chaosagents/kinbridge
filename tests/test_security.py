@@ -268,5 +268,173 @@ class LiveServer(unittest.TestCase):
         self.assertEqual(status, 404)
 
 
+class CapturingHandler(SimpleNamespace):
+    """Drives Handler.do_GET / do_POST without a socket, so the remote
+    (non-loopback) branches can be exercised directly — a real socket
+    test always connects from 127.0.0.1 and would only ever see the
+    local path."""
+    def _client_local(self):
+        return ab.Handler._client_local(self)
+
+    def _valid_host(self):
+        return ab.Handler._valid_host(self)
+
+    def _valid_origin(self):
+        return ab.Handler._valid_origin(self)
+
+    def _check_access(self):
+        return ab.Handler._check_access(self)
+
+    def _json_body(self):
+        return self.body
+
+    def _send(self, code, body, ctype="application/json", extra_headers=None):
+        self.sent = (code, body)
+
+    def get(self, path):
+        self.command, self.path = "GET", path
+        ab.Handler.do_GET(self)
+        code, body = self.sent
+        return code, json.loads(body)
+
+    def post(self, path, body):
+        self.command, self.path, self.body = "POST", path, body
+        ab.Handler.do_POST(self)
+        return self.sent[0]
+
+
+def make_client(ip, pin="123456"):
+    class H(dict):
+        def get(self, k, default=None):
+            return dict.get(self, k, default)
+    return CapturingHandler(
+        client_address=(ip, 12345),
+        headers=H({"Host": "127.0.0.1", "X-Ani-Pin": pin}),
+        body={}, sent=None)
+
+
+REAL_KEYS = {
+    "xai_api_key": "xai-notarealkey0001",
+    "kindroid_api_key": "kn_notarealkey0002",
+    "anthropic_api_key": "sk-ant-notarealkey0003",
+    "gemini_api_key": "AIzaNotARealKey0004",
+    "openai_api_key": "sk-notarealkey0005",
+}
+
+
+class SecretMasking(unittest.TestCase):
+    """A remote client must never receive a real credential, and the mask
+    it gets instead must never be able to overwrite one."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self._old_cfg_path = ab.CONFIG_PATH
+        ab.CONFIG_PATH = os.path.join(self._tmp.name, "config.json")
+        self._old_hosts = ab.ALLOWED_HOSTS
+        ab.ALLOWED_HOSTS = {"127.0.0.1", "localhost", "::1"}
+        with ab._pin_fail_lock:
+            ab._pin_fails.clear()
+        cfg = dict(REAL_KEYS)
+        cfg["access_pin"] = "123456"
+        cfg["daily_budget"] = 40
+        ab.save_config(cfg)
+
+    def tearDown(self):
+        ab.CONFIG_PATH = self._old_cfg_path
+        ab.ALLOWED_HOSTS = self._old_hosts
+        with ab._pin_fail_lock:
+            ab._pin_fails.clear()
+        self._tmp.cleanup()
+
+    # ---------------------------------------------------------- reading
+
+    def test_local_client_still_gets_real_keys(self):
+        code, cfg = make_client("127.0.0.1").get("/api/config")
+        self.assertEqual(code, 200)
+        for k, v in REAL_KEYS.items():
+            self.assertEqual(cfg[k], v)
+
+    def test_remote_client_gets_mask_not_keys(self):
+        code, cfg = make_client("10.0.0.9").get("/api/config")
+        self.assertEqual(code, 200)
+        for k in REAL_KEYS:
+            self.assertEqual(cfg[k], ab.SECRET_MASK)
+
+    def test_remote_client_never_sees_a_real_key_anywhere(self):
+        _, cfg = make_client("10.0.0.9").get("/api/config")
+        blob = json.dumps(cfg)
+        for v in REAL_KEYS.values():
+            self.assertNotIn(v, blob)
+        self.assertNotIn("123456", blob)
+
+    def test_access_pin_is_masked_remotely(self):
+        _, cfg = make_client("10.0.0.9").get("/api/config")
+        self.assertEqual(cfg["access_pin"], ab.SECRET_MASK)
+
+    def test_unset_secret_stays_empty_not_masked(self):
+        ab.save_config({"openai_api_key": ""})
+        _, cfg = make_client("10.0.0.9").get("/api/config")
+        self.assertEqual(cfg["openai_api_key"], "")
+        self.assertEqual(cfg["xai_api_key"], ab.SECRET_MASK)
+
+    def test_non_secret_settings_visible_remotely(self):
+        _, cfg = make_client("10.0.0.9").get("/api/config")
+        self.assertEqual(cfg["daily_budget"], 40)
+
+    # ---------------------------------------------------------- writing
+
+    def test_masked_value_posted_back_does_not_overwrite(self):
+        """The whole point of the sentinel."""
+        code = make_client("10.0.0.9").post(
+            "/api/config", {"xai_api_key": ab.SECRET_MASK})
+        self.assertEqual(code, 200)
+        self.assertEqual(ab.load_config()["xai_api_key"],
+                         REAL_KEYS["xai_api_key"])
+
+    def test_settings_round_trip_from_remote_preserves_every_key(self):
+        """Regression guard for the realistic failure: the Settings
+        dialog GETs the config, the user changes one unrelated field, and
+        the form POSTs every field back — including the masked ones."""
+        client = make_client("10.0.0.9")
+        _, cfg = client.get("/api/config")
+        cfg["daily_budget"] = 99                  # the user's actual edit
+        self.assertEqual(client.post("/api/config", cfg), 200)
+
+        saved = ab.load_config()
+        self.assertEqual(saved["daily_budget"], 99)
+        for k, v in REAL_KEYS.items():
+            self.assertEqual(saved[k], v, "%s was overwritten by the mask" % k)
+        self.assertEqual(saved["access_pin"], "123456")
+
+    def test_remote_can_still_rotate_a_key(self):
+        make_client("10.0.0.9").post(
+            "/api/config", {"xai_api_key": "xai-rotated0006"})
+        self.assertEqual(ab.load_config()["xai_api_key"], "xai-rotated0006")
+
+    def test_remote_can_still_clear_a_key(self):
+        make_client("10.0.0.9").post("/api/config", {"xai_api_key": ""})
+        self.assertEqual(ab.load_config()["xai_api_key"], "")
+
+    def test_mask_is_only_special_for_secret_fields(self):
+        make_client("10.0.0.9").post(
+            "/api/config", {"ani_persona": ab.SECRET_MASK})
+        self.assertEqual(ab.load_config()["ani_persona"], ab.SECRET_MASK)
+
+    def test_strip_masked_leaves_everything_else_alone(self):
+        out = ab._strip_masked({"xai_api_key": ab.SECRET_MASK,
+                                "gemini_api_key": "AIzaNew0007",
+                                "daily_budget": 12})
+        self.assertNotIn("xai_api_key", out)
+        self.assertEqual(out["gemini_api_key"], "AIzaNew0007")
+        self.assertEqual(out["daily_budget"], 12)
+
+    # ------------------------------------------------------------ authz
+
+    def test_remote_without_pin_gets_nothing(self):
+        code, body = make_client("10.0.0.9", pin="").get("/api/config")
+        self.assertEqual(code, 401)
+        self.assertNotIn(REAL_KEYS["xai_api_key"], json.dumps(body))
+
+
 if __name__ == "__main__":
     unittest.main()

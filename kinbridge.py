@@ -130,6 +130,40 @@ def save_config(new_values):
     return cfg
 
 
+# Credentials never leave this machine in the clear. A remote client (LAN
+# or Tailscale) that reads /api/config gets SECRET_MASK in place of each
+# configured secret, so a stolen PIN buys control of the bridge but not
+# the API keys behind it.
+#
+# The mask has to survive a round trip: the Settings dialog POSTs every
+# field back on save, so without _strip_masked() a remote user editing
+# an unrelated setting would write the mask over the real key and destroy
+# it. Any secret that comes back exactly equal to the mask means "leave
+# this one alone" — a genuinely new value or an empty string still saves
+# normally, so rotating or clearing a key from your phone still works.
+SECRET_MASK = "•" * 8
+SECRET_KEYS = ("xai_api_key", "kindroid_api_key", "anthropic_api_key",
+               "gemini_api_key", "openai_api_key", "access_pin")
+
+
+def _mask_secrets(cfg):
+    """Copy of cfg with each configured secret replaced by SECRET_MASK.
+    Unset secrets stay empty so the dashboard can still tell you which
+    keys aren't configured yet."""
+    out = dict(cfg)
+    for k in SECRET_KEYS:
+        if out.get(k):
+            out[k] = SECRET_MASK
+    return out
+
+
+def _strip_masked(body):
+    """Drop secrets the client handed back untouched, so saving unrelated
+    settings can't overwrite a real key with the mask."""
+    return {k: v for k, v in body.items()
+            if not (k in SECRET_KEYS and v == SECRET_MASK)}
+
+
 def load_memory():
     if os.path.exists(MEMORY_PATH):
         try:
@@ -2648,7 +2682,10 @@ class Handler(BaseHTTPRequestHandler):
                 snap["access_pin"] = load_config().get("access_pin", "")
             self._send(200, json.dumps(snap))
         elif path == "/api/config":
-            self._send(200, json.dumps(load_config()))
+            cfg = load_config()
+            if not self._client_local():
+                cfg = _mask_secrets(cfg)
+            self._send(200, json.dumps(cfg))
         elif path == "/api/memory-file":
             self._send(200, json.dumps({"text": load_memory(), "story": load_story(),
                                         "guests": load_guest_memory()}))
@@ -2679,7 +2716,10 @@ class Handler(BaseHTTPRequestHandler):
         body = self._json_body()
         ok = {"ok": True}
         if path == "/api/config":
-            save_config(body)
+            # Unconditional: a local client never receives the mask, so
+            # stripping it here is free, and it keeps the guarantee even
+            # if _client_local() is fooled (e.g. by a reverse proxy).
+            save_config(_strip_masked(body))
         elif path == "/api/start":
             BRIDGE.start(body.get("mode", "auto"),
                          body.get("rounds", 5))

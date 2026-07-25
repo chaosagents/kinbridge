@@ -33,6 +33,15 @@ model and what the app does about it.
   better way to reach the bridge from your phone (Tailscale), which is
   encrypted and doesn't expose anything to your LAN.
 
+- **A stolen PIN turning into stolen API keys.** Your provider keys and
+  the PIN itself never leave this machine in the clear. A client on
+  loopback sees the real values (that's the Settings dialog on the
+  computer running the bridge); any remote client gets a placeholder
+  instead. So a compromised PIN costs you control of the bridge, not
+  five API keys billable off your machine. You can still rotate or clear
+  a key from your phone — sending a new value works normally, and
+  sending the placeholder back is understood as "leave this one alone."
+
 ## What it does NOT protect against
 
 - **Someone with access to this computer.** `config.json` stores your API
