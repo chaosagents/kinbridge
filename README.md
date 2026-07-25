@@ -8,10 +8,13 @@ while you watch from a web dashboard on your computer or phone.
 **Status:** Provided as-is. PRs are welcome; there is no guaranteed
 support — see [Support](#support).
 
-<!-- TODO: add a dashboard screenshot here, e.g.:
-       ![The Kinbridge dashboard](docs/screenshot.png)
-     SANITIZE IT FIRST — the dashboard shows your actual conversations.
-     Black out message text, character names, and the access PIN. -->
+![The Kinbridge dashboard control column: director console with mode and
+round settings, scene director, chapter switcher, and buttons to bring
+AI guests into the room.](docs/screenshot.png)
+
+*The control column. The live conversation feed sits to its left and is
+cropped out of this shot — a real dashboard shows your actual messages,
+so sanitize before sharing screenshots of your own.*
 
 
 ## What it does
