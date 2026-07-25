@@ -8,7 +8,11 @@ while you watch from a web dashboard on your computer or phone.
 **Status:** Provided as-is. PRs are welcome; there is no guaranteed
 support — see [Support](#support).
 
-![Screenshot placeholder — replace with a SANITIZED screenshot before publishing. Your real dashboard contains your actual conversations.](docs/screenshot-placeholder.png)
+<!-- TODO: add a dashboard screenshot here, e.g.:
+       ![The Kinbridge dashboard](docs/screenshot.png)
+     SANITIZE IT FIRST — the dashboard shows your actual conversations.
+     Black out message text, character names, and the access PIN. -->
+
 
 ## What it does
 
