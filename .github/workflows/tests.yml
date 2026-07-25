@@ -1,0 +1,56 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: ${{ matrix.os }} / Python ${{ matrix.python }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+        # README claims Python 3.8+; the oldest entry is what keeps that
+        # claim honest rather than aspirational.
+        python: ["3.8", "3.11", "3.13"]
+        include:
+          # The app ships a .bat launcher, and _open_private() has a
+          # Windows-only fallback (no os.fchmod there) that nothing else
+          # exercises. The permission assertions skip on nt by design.
+          - os: windows-latest
+            python: "3.13"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      # No install step: the app and its tests are standard library only.
+      # If a dependency ever sneaks in, this workflow fails, which is the
+      # point.
+      - name: Run the test suite
+        run: python -m unittest discover tests -v
+
+  all-green:
+    # Single stable context to mark as a required check, so the matrix can
+    # change without editing branch protection.
+    name: all tests passed
+    needs: test
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check matrix result
+        run: |
+          if [ "${{ needs.test.result }}" != "success" ]; then
+            echo "Test matrix result: ${{ needs.test.result }}"
+            exit 1
+          fi
+          echo "All test jobs passed."
