@@ -436,5 +436,164 @@ class SecretMasking(unittest.TestCase):
         self.assertNotIn(REAL_KEYS["xai_api_key"], json.dumps(body))
 
 
+class ConfigFilePermissions(unittest.TestCase):
+    """config.json holds API keys in plain text, so it must not be
+    readable by other users on a shared machine."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self._old_cfg_path = ab.CONFIG_PATH
+        ab.CONFIG_PATH = os.path.join(self._tmp.name, "config.json")
+
+    def tearDown(self):
+        ab.CONFIG_PATH = self._old_cfg_path
+        self._tmp.cleanup()
+
+    @unittest.skipIf(os.name == "nt", "POSIX permission bits only")
+    def test_new_config_is_owner_only(self):
+        ab.save_config({"xai_api_key": "xai-perm0001"})
+        mode = os.stat(ab.CONFIG_PATH).st_mode & 0o777
+        self.assertEqual(mode, 0o600, "config.json is %o, expected 600" % mode)
+
+    @unittest.skipIf(os.name == "nt", "POSIX permission bits only")
+    def test_existing_loose_config_is_tightened(self):
+        ab.save_config({"xai_api_key": "xai-perm0002"})
+        os.chmod(ab.CONFIG_PATH, 0o644)          # as an older version left it
+        ab.save_config({"daily_budget": 7})      # any later write
+        self.assertEqual(os.stat(ab.CONFIG_PATH).st_mode & 0o777, 0o600)
+
+    @unittest.skipIf(os.name == "nt", "POSIX permission bits only")
+    def test_never_world_readable_even_briefly(self):
+        """O_CREAT with mode 0600 rather than write-then-chmod, so there's
+        no window where the keys sit in a world-readable file."""
+        ab.save_config({"xai_api_key": "xai-perm0003"})
+        os.remove(ab.CONFIG_PATH)
+        seen = []
+        real_open = os.open
+
+        def watching_open(path, flags, mode=0o777, **kw):
+            if path == ab.CONFIG_PATH:
+                seen.append(mode)
+            return real_open(path, flags, mode, **kw)
+
+        os.open = watching_open
+        try:
+            ab.save_config({"xai_api_key": "xai-perm0004"})
+        finally:
+            os.open = real_open
+        self.assertEqual(seen, [0o600])
+
+
+class EnvSecretOverride(unittest.TestCase):
+    """Secrets may come from the environment instead of config.json."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self._old_cfg_path = ab.CONFIG_PATH
+        ab.CONFIG_PATH = os.path.join(self._tmp.name, "config.json")
+        self._old_hosts = ab.ALLOWED_HOSTS
+        ab.ALLOWED_HOSTS = {"127.0.0.1", "localhost", "::1"}
+        with ab._pin_fail_lock:
+            ab._pin_fails.clear()
+        ab.save_config({"xai_api_key": "xai-fromfile0001",
+                        "gemini_api_key": "AIzaFromFile0002",
+                        "access_pin": "123456", "daily_budget": 40})
+        self._env_backup = {}
+
+    def tearDown(self):
+        for k, v in self._env_backup.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        ab.CONFIG_PATH = self._old_cfg_path
+        ab.ALLOWED_HOSTS = self._old_hosts
+        with ab._pin_fail_lock:
+            ab._pin_fails.clear()
+        self._tmp.cleanup()
+
+    def _set_env(self, name, value):
+        self._env_backup.setdefault(name, os.environ.get(name))
+        os.environ[name] = value
+
+    def _stored_raw(self):
+        with open(ab.CONFIG_PATH, "r", encoding="utf-8") as f:
+            return json.load(f)
+
+    def test_env_value_wins_over_file(self):
+        self._set_env("KINBRIDGE_XAI_API_KEY", "xai-fromenv0003")
+        self.assertEqual(ab.load_config()["xai_api_key"], "xai-fromenv0003")
+
+    def test_file_used_when_env_absent(self):
+        self.assertEqual(ab.load_config()["xai_api_key"], "xai-fromfile0001")
+
+    def test_empty_env_var_is_ignored(self):
+        self._set_env("KINBRIDGE_XAI_API_KEY", "")
+        self.assertEqual(ab.load_config()["xai_api_key"], "xai-fromfile0001")
+
+    def test_env_secret_is_never_written_to_disk(self):
+        """The point of the feature: keys stay out of the app directory."""
+        self._set_env("KINBRIDGE_XAI_API_KEY", "xai-fromenv0004")
+        ab.save_config({"daily_budget": 99})
+        raw = self._stored_raw()
+        self.assertEqual(raw["daily_budget"], 99)
+        self.assertNotIn("xai-fromenv0004", json.dumps(raw))
+        self.assertEqual(raw["xai_api_key"], "xai-fromfile0001")
+
+    def test_dashboard_cannot_overwrite_an_env_secret(self):
+        self._set_env("KINBRIDGE_XAI_API_KEY", "xai-fromenv0005")
+        ab.save_config({"xai_api_key": "xai-typedintoui0006"})
+        self.assertNotIn("xai-typedintoui0006", json.dumps(self._stored_raw()))
+        self.assertEqual(ab.load_config()["xai_api_key"], "xai-fromenv0005")
+
+    def test_non_env_secret_still_saves_normally(self):
+        self._set_env("KINBRIDGE_XAI_API_KEY", "xai-fromenv0007")
+        ab.save_config({"gemini_api_key": "AIzaRotated0008"})
+        self.assertEqual(ab.load_config()["gemini_api_key"], "AIzaRotated0008")
+
+    def test_save_config_returns_effective_values(self):
+        self._set_env("KINBRIDGE_XAI_API_KEY", "xai-fromenv0009")
+        returned = ab.save_config({"daily_budget": 5})
+        self.assertEqual(returned["xai_api_key"], "xai-fromenv0009")
+        self.assertEqual(returned["daily_budget"], 5)
+
+    def test_access_pin_can_come_from_env(self):
+        self._set_env("KINBRIDGE_ACCESS_PIN", "999888")
+        self.assertEqual(ab.load_config()["access_pin"], "999888")
+
+    def test_env_pin_authenticates_a_remote_client(self):
+        self._set_env("KINBRIDGE_ACCESS_PIN", "999888")
+        code, _ = make_client("10.0.0.9", pin="999888").get("/api/config")
+        self.assertEqual(code, 200)
+        code, _ = make_client("10.0.0.9", pin="123456").get("/api/config")
+        self.assertEqual(code, 401)
+
+    def test_env_locked_reported_and_masked_locally(self):
+        self._set_env("KINBRIDGE_XAI_API_KEY", "xai-fromenv0010")
+        _, cfg = make_client("127.0.0.1").get("/api/config")
+        self.assertEqual(cfg["env_locked"], ["xai_api_key"])
+        self.assertEqual(cfg["xai_api_key"], ab.SECRET_MASK)
+        # a file-backed secret is still shown to a local client
+        self.assertEqual(cfg["gemini_api_key"], "AIzaFromFile0002")
+
+    def test_env_secret_still_masked_for_remote(self):
+        self._set_env("KINBRIDGE_XAI_API_KEY", "xai-fromenv0011")
+        _, cfg = make_client("10.0.0.9").get("/api/config")
+        self.assertNotIn("xai-fromenv0011", json.dumps(cfg))
+        self.assertEqual(cfg["xai_api_key"], ab.SECRET_MASK)
+
+    def test_env_locked_echo_cannot_corrupt_config(self):
+        """env_locked is an extra field in the GET response; the Settings
+        dialog POSTs the whole object back, so it must be harmless."""
+        self._set_env("KINBRIDGE_XAI_API_KEY", "xai-fromenv0012")
+        client = make_client("127.0.0.1")
+        _, cfg = client.get("/api/config")
+        cfg["daily_budget"] = 77
+        self.assertEqual(client.post("/api/config", cfg), 200)
+        self.assertEqual(ab.load_config()["daily_budget"], 77)
+        self.assertNotIn("env_locked", self._stored_raw())
+        self.assertEqual(self._stored_raw()["xai_api_key"], "xai-fromfile0001")
+
+
 if __name__ == "__main__":
     unittest.main()

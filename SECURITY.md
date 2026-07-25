@@ -44,11 +44,20 @@ model and what the app does about it.
 
 ## What it does NOT protect against
 
-- **Someone with access to this computer.** `config.json` stores your API
-  keys and PIN in plain text next to the script. Anyone who can read
-  files on this machine can read your keys. This is the same trust model
-  as any local dev tool or `.env` file — it is not designed to resist a
-  local attacker or malware already running as your user.
+- **Someone running as you on this computer.** `config.json` stores your
+  API keys and PIN in plain text next to the script. It's created `0600`
+  (owner only) so *other* users on a shared machine can't read it, and
+  you can keep keys out of the file entirely with the `KINBRIDGE_*`
+  environment variables described in the README — but neither is
+  encryption. Anything running as your user can still read the keys.
+  This is the same trust model as any local dev tool or `.env` file: it
+  is not designed to resist malware already running as you.
+
+  Encrypting the file at rest would mean a third-party crypto library
+  (Python's standard library has key-derivation functions but no cipher),
+  which would end the zero-dependency guarantee, and a passphrase prompt
+  on every launch — while still leaving the keys in process memory for
+  anything running as you to read. That trade wasn't judged worth it.
 - **A compromised Kindroid character or AI guest.** Text coming back from
   Kindroid, xAI, Anthropic, Google, or OpenAI is rendered into the
   dashboard using `textContent` (not `innerHTML`), so it can't inject

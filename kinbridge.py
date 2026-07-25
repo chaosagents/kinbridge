@@ -105,31 +105,6 @@ DEFAULT_CONFIG = {
 _cfg_lock = threading.Lock()
 
 
-def load_config():
-    with _cfg_lock:
-        if os.path.exists(CONFIG_PATH):
-            try:
-                with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                merged = dict(DEFAULT_CONFIG)
-                merged.update({k: v for k, v in data.items() if k in DEFAULT_CONFIG})
-                return merged
-            except Exception:
-                pass
-        return dict(DEFAULT_CONFIG)
-
-
-def save_config(new_values):
-    cfg = load_config()
-    for k in DEFAULT_CONFIG:
-        if k in new_values and new_values[k] is not None:
-            cfg[k] = new_values[k]
-    with _cfg_lock:
-        with open(CONFIG_PATH, "w", encoding="utf-8") as f:
-            json.dump(cfg, f, indent=2, ensure_ascii=False)
-    return cfg
-
-
 # Credentials never leave this machine in the clear. A remote client (LAN
 # or Tailscale) that reads /api/config gets SECRET_MASK in place of each
 # configured secret, so a stolen PIN buys control of the bridge but not
@@ -162,6 +137,75 @@ def _strip_masked(body):
     settings can't overwrite a real key with the mask."""
     return {k: v for k, v in body.items()
             if not (k in SECRET_KEYS and v == SECRET_MASK)}
+
+
+# Any secret can come from the environment instead of config.json —
+# KINBRIDGE_XAI_API_KEY, KINBRIDGE_ACCESS_PIN, and so on. An env-supplied
+# value wins over the file, is never written back to it, and can't be
+# overwritten through the dashboard (saving one is ignored rather than
+# silently failing to take effect). That lets keys live in systemd, a
+# password manager, or a .env you control instead of next to the app.
+ENV_PREFIX = "KINBRIDGE_"
+
+
+def _env_secrets():
+    """Secrets supplied by the environment, keyed by config field name."""
+    found = {}
+    for k in SECRET_KEYS:
+        v = os.environ.get(ENV_PREFIX + k.upper(), "")
+        if v:
+            found[k] = v
+    return found
+
+
+def _stored_config():
+    """Config exactly as it sits on disk, merged over the defaults, with
+    no environment overlay. This is the base save_config writes back, so
+    an env-supplied secret never gets persisted into config.json."""
+    with _cfg_lock:
+        if os.path.exists(CONFIG_PATH):
+            try:
+                with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                merged = dict(DEFAULT_CONFIG)
+                merged.update({k: v for k, v in data.items() if k in DEFAULT_CONFIG})
+                return merged
+            except Exception:
+                pass
+        return dict(DEFAULT_CONFIG)
+
+
+def load_config():
+    """The effective config: what's on disk, with env secrets layered on
+    top. Everything downstream reads this."""
+    cfg = _stored_config()
+    cfg.update(_env_secrets())
+    return cfg
+
+
+def save_config(new_values):
+    env = _env_secrets()
+    cfg = _stored_config()
+    for k in DEFAULT_CONFIG:
+        # env-controlled secrets are read-only here: writing them to disk
+        # would leak them into config.json and still lose to the env on
+        # the next read
+        if k in new_values and new_values[k] is not None and k not in env:
+            cfg[k] = new_values[k]
+    with _cfg_lock:
+        # 0600 from the moment it exists — creating it world-readable and
+        # chmod-ing afterwards leaves a window where the keys are exposed
+        fd = os.open(CONFIG_PATH, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, indent=2, ensure_ascii=False)
+        try:
+            # O_CREAT's mode is ignored for a file that already exists, so
+            # tighten one written by an older version too. No-op on Windows.
+            os.chmod(CONFIG_PATH, 0o600)
+        except OSError:
+            pass
+    cfg.update(env)  # callers get the effective config, not the stored one
+    return cfg
 
 
 def load_memory():
@@ -2683,8 +2727,15 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, json.dumps(snap))
         elif path == "/api/config":
             cfg = load_config()
+            env = _env_secrets()
             if not self._client_local():
                 cfg = _mask_secrets(cfg)
+            else:
+                # env-supplied secrets aren't stored here and can't be
+                # edited here, so don't show a value the dialog can't save
+                for k in env:
+                    cfg[k] = SECRET_MASK
+            cfg["env_locked"] = sorted(env)
             self._send(200, json.dumps(cfg))
         elif path == "/api/memory-file":
             self._send(200, json.dumps({"text": load_memory(), "story": load_story(),
@@ -2895,8 +2946,11 @@ def main():
     url = "http://127.0.0.1:%d" % port
     LAN_URLS = ["http://%s:%d" % (ip, port) for ip in lan_ips] if allow_lan else []
     print("")
-    print("  Ani <-> Kindroid Bridge v" + APP_VERSION + " is running!")
+    print("  Kinbridge v" + APP_VERSION + " is running!")
     print("  Running from:       " + APP_DIR)
+    env_locked = _env_secrets()
+    if env_locked:
+        print("  From environment:   " + ", ".join(sorted(env_locked)))
     print("  On this computer:   " + url)
     if allow_lan:
         if LAN_URLS:

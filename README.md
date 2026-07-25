@@ -55,8 +55,28 @@ memory files next to the script — see [Privacy](#privacy--your-data).
 
 ## Privacy & your data
 
-- `config.json` holds your API keys and access PIN in plain text. Treat
-  it like any other secrets file — don't commit it, don't share it.
+- `config.json` holds your API keys and access PIN in plain text. It's
+  created `0600` (owner read/write only), so other users on a shared
+  machine can't read it — but it isn't encrypted. Treat it like any
+  other secrets file: don't commit it, don't share it.
+- **Prefer environment variables if you'd rather keep keys out of the
+  app directory entirely.** Any secret can come from the environment,
+  and an env-supplied value wins over `config.json`, is never written
+  back to it, and can't be overwritten from the dashboard:
+
+  | Variable | Replaces |
+  | --- | --- |
+  | `KINBRIDGE_XAI_API_KEY` | `xai_api_key` |
+  | `KINBRIDGE_KINDROID_API_KEY` | `kindroid_api_key` |
+  | `KINBRIDGE_ANTHROPIC_API_KEY` | `anthropic_api_key` |
+  | `KINBRIDGE_GEMINI_API_KEY` | `gemini_api_key` |
+  | `KINBRIDGE_OPENAI_API_KEY` | `openai_api_key` |
+  | `KINBRIDGE_ACCESS_PIN` | `access_pin` |
+
+  Keys sourced this way show as `••••••••` in Settings and are listed
+  on startup, so it's obvious where they came from. This doesn't encrypt
+  anything — it just lets your keys live in systemd, a password manager,
+  or a shell profile you control instead of next to the script.
 - `ani_memory.md`, `guest_memory.md`, `chapters/`, and `session_logs/`
   contain your actual conversations. All of these are already listed in
   `.gitignore`.
