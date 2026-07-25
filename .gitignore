@@ -1,0 +1,27 @@
+# --- Secrets & personal data: never commit these ---
+config.json
+*.log
+session_logs/
+chapters/
+ani_memory.md
+guest_memory.md
+ani_story_state.md
+# Episode exports downloaded from the dashboard — these are full
+# transcripts. Ignored in case one gets saved next to the app.
+kinbridge-episode-*.md
+ani-episode-*.md
+
+# --- Python ---
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# --- OS / editor cruft ---
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+.claude/
+*.swp
