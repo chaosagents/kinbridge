@@ -582,6 +582,39 @@ class EnvSecretOverride(unittest.TestCase):
         self.assertNotIn("xai-fromenv0011", json.dumps(cfg))
         self.assertEqual(cfg["xai_api_key"], ab.SECRET_MASK)
 
+    def test_remote_round_trip_with_env_locked_secret_writes_nothing(self):
+        """The crossing case: a remote client gets the same mask for an
+        env-locked secret and a file-backed one, then POSTs the whole form
+        back. _strip_masked and the env guard both apply, and the stored
+        config must come out identical."""
+        self._set_env("KINBRIDGE_XAI_API_KEY", "xai-fromenv0013")
+        before = self._stored_raw()
+        client = make_client("10.0.0.9")
+        _, cfg = client.get("/api/config")
+        self.assertEqual(cfg["xai_api_key"], ab.SECRET_MASK)     # env-locked
+        self.assertEqual(cfg["gemini_api_key"], ab.SECRET_MASK)  # file-backed
+        self.assertEqual(client.post("/api/config", cfg), 200)
+
+        self.assertEqual(self._stored_raw(), before)
+        self.assertEqual(ab.load_config()["xai_api_key"], "xai-fromenv0013")
+        self.assertEqual(ab.load_config()["gemini_api_key"], "AIzaFromFile0002")
+
+    def test_remote_edit_alongside_env_locked_secret_saves_only_the_edit(self):
+        """Same crossing, but the user actually changes something — the
+        edit lands and neither masked secret moves."""
+        self._set_env("KINBRIDGE_XAI_API_KEY", "xai-fromenv0014")
+        client = make_client("10.0.0.9")
+        _, cfg = client.get("/api/config")
+        cfg["daily_budget"] = 88
+        self.assertEqual(client.post("/api/config", cfg), 200)
+
+        raw = self._stored_raw()
+        self.assertEqual(raw["daily_budget"], 88)
+        self.assertEqual(raw["xai_api_key"], "xai-fromfile0001")
+        self.assertEqual(raw["gemini_api_key"], "AIzaFromFile0002")
+        self.assertNotIn("xai-fromenv0014", json.dumps(raw))
+        self.assertNotIn(ab.SECRET_MASK, json.dumps(raw))
+
     def test_env_locked_echo_cannot_corrupt_config(self):
         """env_locked is an extra field in the GET response; the Settings
         dialog POSTs the whole object back, so it must be harmless."""
