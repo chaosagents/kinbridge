@@ -30,7 +30,7 @@ What you thought would happen instead.
 
 - OS (Windows/macOS/Linux):
 - Python version (`python3 --version`):
-- Kinbridge version (top-right pill in the dashboard, e.g. `v27`):
+- Kinbridge version (top-right pill in the dashboard, e.g. `v28`):
 - Which API(s) involved (xAI / Kindroid / Anthropic / Gemini / OpenAI):
 
 **Logs (redacted!)**

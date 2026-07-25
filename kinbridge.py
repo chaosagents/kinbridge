@@ -31,7 +31,7 @@ from datetime import datetime
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
-APP_VERSION = "27"
+APP_VERSION = "28"
 CONFIG_PATH = os.path.join(APP_DIR, "config.json")
 MEMORY_PATH = os.path.join(APP_DIR, "ani_memory.md")
 LOG_DIR = os.path.join(APP_DIR, "session_logs")
@@ -2053,7 +2053,7 @@ dialog::backdrop{background:rgba(8,5,14,.7)}
 <div class="wrap">
   <header>
     <h1>Ani <span class="x">&harr;</span> Kindroid</h1>
-    <span class="pill" id="verchip">v27</span>
+    <span class="pill" id="verchip">v28</span>
     <span id="onair" class="pill"><span class="dot"></span><span id="onairText">Offline</span></span>
     <span class="spacer"></span>
     <span id="costchip" class="pill" title="Estimated xAI spend this session">≈$0.000</span>
@@ -2283,7 +2283,7 @@ dialog::backdrop{background:rgba(8,5,14,.7)}
 
 <script>
 const $=id=>document.getElementById(id);
-const PAGEV='27';
+const PAGEV='28';
 const dlg=$('dlg'), memdlg=$('memdlg'), syncdlg=$('syncdlg');
 
 async function buildSync(){
