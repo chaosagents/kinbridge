@@ -541,5 +541,152 @@ class OpenAIChatParsing(unittest.TestCase):
         self.assertIn("OpenAI", str(cm.exception))
 
 
+class FetchModels(unittest.TestCase):
+    """The Settings "Scan" button. Each provider returns a different
+    shape and needs different filtering, and the whole point is to keep
+    non-chat models out of the dropdowns."""
+
+    def _fetch(self, provider, cfg, payload):
+        fake = FakeHttp([payload])
+        with mock.patch.object(ab, "http_request", fake):
+            models = ab.fetch_models(provider, cfg)
+        return fake, models
+
+    @staticmethod
+    def _data(*ids):
+        return json.dumps({"data": [{"id": i} for i in ids]})
+
+    # ------------------------------------------------------------- xai
+
+    def test_xai_keeps_only_grok_models(self):
+        _, models = self._fetch("xai", {"xai_api_key": "k"},
+                                self._data("grok-4", "grok-3-mini",
+                                           "some-other-model"))
+        self.assertEqual(models, ["grok-4", "grok-3-mini"])
+
+    def test_xai_grok_match_is_case_insensitive(self):
+        _, models = self._fetch("xai", {"xai_api_key": "k"},
+                                self._data("GROK-Beta"))
+        self.assertEqual(models, ["GROK-Beta"])
+
+    def test_xai_request_shape(self):
+        fake, _ = self._fetch("xai", {"xai_api_key": "k"}, self._data("grok-4"))
+        url, method, headers, _ = fake.calls[0]
+        self.assertEqual(url, "https://api.x.ai/v1/models")
+        self.assertEqual(method, "GET")
+        self.assertEqual(headers["Authorization"], "Bearer k")
+
+    # ------------------------------------------------------- anthropic
+
+    def test_anthropic_returns_every_id(self):
+        _, models = self._fetch("anthropic", {"anthropic_api_key": "k"},
+                                self._data("claude-sonnet-4-6", "claude-opus-4-1"))
+        self.assertEqual(models, ["claude-sonnet-4-6", "claude-opus-4-1"])
+
+    def test_anthropic_sends_version_header(self):
+        fake, _ = self._fetch("anthropic", {"anthropic_api_key": "k"},
+                              self._data("claude-sonnet-4-6"))
+        url, _, headers, _ = fake.calls[0]
+        self.assertIn("limit=100", url)
+        self.assertEqual(headers["x-api-key"], "k")
+        self.assertEqual(headers["anthropic-version"], "2023-06-01")
+
+    # ---------------------------------------------------------- openai
+
+    def test_openai_keeps_chat_models(self):
+        _, models = self._fetch("openai", {"openai_api_key": "k"},
+                                self._data("gpt-5.4", "chatgpt-4o-latest"))
+        self.assertEqual(models, ["gpt-5.4", "chatgpt-4o-latest"])
+
+    def test_openai_keeps_o_series(self):
+        _, models = self._fetch("openai", {"openai_api_key": "k"},
+                                self._data("o3", "o4-mini"))
+        self.assertEqual(models, ["o4-mini", "o3"])
+
+    def test_openai_drops_non_chat_modalities(self):
+        _, models = self._fetch("openai", {"openai_api_key": "k"}, self._data(
+            "gpt-5.4",
+            "gpt-4o-audio-preview", "gpt-4o-realtime-preview",
+            "gpt-image-1", "gpt-4o-mini-tts", "gpt-4o-transcribe",
+            "text-embedding-3-large", "omni-moderation-latest",
+            "gpt-4o-search-preview", "dall-e-3", "whisper-1"))
+        self.assertEqual(models, ["gpt-5.4"])
+
+    def test_openai_drops_unrelated_prefixes(self):
+        _, models = self._fetch("openai", {"openai_api_key": "k"},
+                                self._data("gpt-5.4", "babbage-002"))
+        self.assertEqual(models, ["gpt-5.4"])
+
+    # ---------------------------------------------------------- gemini
+
+    def _gemini(self, *models):
+        return json.dumps({"models": list(models)})
+
+    def test_gemini_requires_generate_content_support(self):
+        _, models = self._fetch("gemini", {"gemini_api_key": "k"}, self._gemini(
+            {"name": "models/gemini-3.5-flash",
+             "supportedGenerationMethods": ["generateContent"]},
+            {"name": "models/gemini-embedding-001",
+             "supportedGenerationMethods": ["embedContent"]}))
+        self.assertEqual(models, ["gemini-3.5-flash"])
+
+    def test_gemini_strips_the_models_prefix(self):
+        _, models = self._fetch("gemini", {"gemini_api_key": "k"}, self._gemini(
+            {"name": "models/gemini-3-pro",
+             "supportedGenerationMethods": ["generateContent"]}))
+        self.assertEqual(models, ["gemini-3-pro"])
+
+    def test_gemini_tolerates_missing_methods_field(self):
+        with self.assertRaises(ab.ApiError):   # nothing usable -> error, not crash
+            self._fetch("gemini", {"gemini_api_key": "k"},
+                        self._gemini({"name": "models/gemini-x"}))
+
+    def test_gemini_request_shape(self):
+        fake, _ = self._fetch("gemini", {"gemini_api_key": "k"}, self._gemini(
+            {"name": "models/gemini-3.5-flash",
+             "supportedGenerationMethods": ["generateContent"]}))
+        url, _, headers, _ = fake.calls[0]
+        self.assertIn("generativelanguage.googleapis.com", url)
+        self.assertEqual(headers["x-goog-api-key"], "k")
+
+    # --------------------------------------------------------- general
+
+    def test_results_are_deduped_and_sorted_descending(self):
+        _, models = self._fetch("xai", {"xai_api_key": "k"},
+                                self._data("grok-3", "grok-4", "grok-3"))
+        self.assertEqual(models, ["grok-4", "grok-3"])
+
+    def test_blank_ids_are_dropped(self):
+        _, models = self._fetch("anthropic", {"anthropic_api_key": "k"},
+                                self._data("claude-sonnet-4-6", ""))
+        self.assertEqual(models, ["claude-sonnet-4-6"])
+
+    def test_no_usable_models_is_an_error(self):
+        with self.assertRaises(ab.ApiError) as cm:
+            self._fetch("xai", {"xai_api_key": "k"}, self._data("some-other-model"))
+        self.assertIn("no usable models", str(cm.exception))
+
+    def test_unknown_provider_rejected(self):
+        fake = FakeHttp([])
+        with mock.patch.object(ab, "http_request", fake):
+            with self.assertRaises(ab.ApiError) as cm:
+                ab.fetch_models("mistral", {})
+        self.assertIn("Unknown provider", str(cm.exception))
+        self.assertEqual(fake.calls, [])
+
+    def test_every_provider_demands_its_key_before_scanning(self):
+        for provider, field in [("xai", "xai_api_key"),
+                                ("anthropic", "anthropic_api_key"),
+                                ("openai", "openai_api_key"),
+                                ("gemini", "gemini_api_key")]:
+            for cfg in ({}, {field: "   "}):
+                fake = FakeHttp([])   # a request would raise AssertionError
+                with mock.patch.object(ab, "http_request", fake):
+                    with self.assertRaises(ab.ApiError) as cm:
+                        ab.fetch_models(provider, cfg)
+                self.assertIn("then scan", str(cm.exception))
+                self.assertEqual(fake.calls, [], provider + " called the API")
+
+
 if __name__ == "__main__":
     unittest.main()
